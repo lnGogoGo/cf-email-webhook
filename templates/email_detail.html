@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ email.subject or "(无主题)" }} — 邮件详情</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: #f0f2f5;
+      color: #1a1a2e;
+      min-height: 100vh;
+    }
+
+    header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%);
+      color: #fff;
+      padding: 0 2rem;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    header h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+
+    header h1::before { content: "✉"; font-size: 1.2rem; }
+
+    .back-btn {
+      color: #fff;
+      text-decoration: none;
+      font-size: .85rem;
+      padding: 6px 14px;
+      border: 1px solid rgba(255,255,255,.3);
+      border-radius: 6px;
+      transition: border-color .2s, background .2s;
+    }
+
+    .back-btn:hover {
+      background: rgba(255,255,255,.1);
+      border-color: rgba(255,255,255,.6);
+    }
+
+    main {
+      max-width: 860px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+
+    /* ── 邮件卡片 ── */
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+      overflow: hidden;
+      margin-bottom: 1.2rem;
+    }
+
+    /* ── 主题区 ── */
+    .subject-bar {
+      padding: 1.4rem 1.8rem 1rem;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    .subject-bar h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #1a1a2e;
+      word-break: break-word;
+    }
+
+    .subject-bar .meta-date {
+      font-size: .8rem;
+      color: #999;
+      margin-top: .4rem;
+    }
+
+    /* ── 元信息表格 ── */
+    .meta-table {
+      padding: 1rem 1.8rem;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    .meta-row {
+      display: flex;
+      padding: .4rem 0;
+      font-size: .88rem;
+      border-bottom: 1px dashed #f5f5f5;
+      gap: 1rem;
+    }
+
+    .meta-row:last-child { border-bottom: none; }
+
+    .meta-row .key {
+      color: #999;
+      min-width: 80px;
+      flex-shrink: 0;
+      font-weight: 500;
+    }
+
+    .meta-row .val {
+      color: #333;
+      word-break: break-all;
+      flex: 1;
+    }
+
+    /* ── 正文区 ── */
+    .body-section {
+      padding: 1.2rem 1.8rem;
+    }
+
+    .body-section h3 {
+      font-size: .85rem;
+      color: #999;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: .8rem;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+
+    /* Tab 切换 */
+    .tabs {
+      display: flex;
+      gap: .5rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      padding: 4px 14px;
+      border: 1px solid #ddd;
+      border-radius: 20px;
+      font-size: .82rem;
+      cursor: pointer;
+      background: #fff;
+      color: #555;
+      transition: all .15s;
+    }
+
+    .tab-btn.active, .tab-btn:hover {
+      background: #0f3460;
+      color: #fff;
+      border-color: #0f3460;
+    }
+
+    /* 纯文本正文：保留换行 */
+    .body-plain {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: .9rem;
+      line-height: 1.75;
+      color: #333;
+      background: #fafafa;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      max-height: 600px;
+      overflow-y: auto;
+    }
+
+    /* HTML 正文：在 sandboxed iframe 中隔离展示，防止 XSS */
+    .body-html-frame {
+      width: 100%;
+      min-height: 300px;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      background: #fafafa;
+    }
+
+    .hidden { display: none !important; }
+
+    /* ── raw payload ── */
+    .raw-section {
+      padding: 0 1.8rem 1.4rem;
+    }
+
+    details summary {
+      cursor: pointer;
+      font-size: .82rem;
+      color: #999;
+      padding: .5rem 0;
+      user-select: none;
+    }
+
+    details summary:hover { color: #555; }
+
+    pre.raw-json {
+      background: #1e1e2e;
+      color: #a9b1d6;
+      border-radius: 8px;
+      padding: 1rem;
+      font-size: .78rem;
+      overflow-x: auto;
+      max-height: 400px;
+      overflow-y: auto;
+      line-height: 1.5;
+      margin-top: .5rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    @media (max-width: 600px) {
+      main { margin: 1rem auto; }
+      .subject-bar, .meta-table, .body-section, .raw-section { padding-left: 1rem; padding-right: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>邮件详情</h1>
+  <a class="back-btn" href="/">← 返回列表</a>
+</header>
+
+<main>
+  <div class="card">
+
+    <!-- 主题 -->
+    <div class="subject-bar">
+      <h2>{{ email.subject or "(无主题)" }}</h2>
+      <div class="meta-date">接收时间：{{ email.saved_at or "未知" }}</div>
+    </div>
+
+    <!-- 元信息 -->
+    <div class="meta-table">
+      <div class="meta-row">
+        <span class="key">发件人</span>
+        <span class="val">
+          {% if email.from_name %}{{ email.from_name }} {% endif %}
+          {% if email.from_email %}&lt;{{ email.from_email }}&gt;{% else %}未知{% endif %}
+        </span>
+      </div>
+      <div class="meta-row">
+        <span class="key">收件人</span>
+        <span class="val">
+          {% if email.to_name %}{{ email.to_name }} {% endif %}
+          {% if email.to_email %}&lt;{{ email.to_email }}&gt;{% else %}未知{% endif %}
+        </span>
+      </div>
+
+      {% if email.cc and email.cc|length > 0 %}
+      <div class="meta-row">
+        <span class="key">抄送</span>
+        <span class="val">
+          {% for addr in email.cc %}
+            {{ addr.name or "" }} &lt;{{ addr.email }}&gt;{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </span>
+      </div>
+      {% endif %}
+
+      {% if email.bcc and email.bcc|length > 0 %}
+      <div class="meta-row">
+        <span class="key">密送</span>
+        <span class="val">
+          {% for addr in email.bcc %}
+            {{ addr.name or "" }} &lt;{{ addr.email }}&gt;{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </span>
+      </div>
+      {% endif %}
+
+      <div class="meta-row">
+        <span class="key">邮件 ID</span>
+        <span class="val" style="font-family:monospace;font-size:.82rem;color:#aaa">{{ email.id }}</span>
+      </div>
+    </div>
+
+    <!-- 正文 -->
+    <div class="body-section">
+      <h3>📄 邮件正文</h3>
+
+      {% set has_text = email.body_text and email.body_text|trim %}
+      {% set has_html = email.body_html and email.body_html|trim %}
+
+      {% if has_text or has_html %}
+        {% if has_text and has_html %}
+          <!-- 两种格式都有时，提供切换 Tab -->
+          <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab(this, 'plain')">纯文本</button>
+            <button class="tab-btn" onclick="switchTab(this, 'html')">HTML 预览</button>
+          </div>
+          <div id="tab-plain">
+            <pre class="body-plain">{{ email.body_text }}</pre>
+          </div>
+          <div id="tab-html" class="hidden">
+            <!-- srcdoc + sandbox 防止 XSS；allow-same-origin 仅用于 iframe 内部样式读取 -->
+            <iframe
+              class="body-html-frame"
+              sandbox="allow-same-origin"
+              srcdoc="{{ email.body_html | e }}"
+            ></iframe>
+          </div>
+        {% elif has_text %}
+          <pre class="body-plain">{{ email.body_text }}</pre>
+        {% else %}
+          <!-- 只有 HTML：sandboxed iframe 展示 -->
+          <iframe
+            class="body-html-frame"
+            sandbox="allow-same-origin"
+            srcdoc="{{ email.body_html | e }}"
+          ></iframe>
+        {% endif %}
+      {% else %}
+        <p style="color:#aaa;font-size:.9rem;">(无正文内容)</p>
+      {% endif %}
+    </div>
+
+    <!-- 原始 Payload（折叠，便于排查） -->
+    <div class="raw-section">
+      <details>
+        <summary>查看原始请求体 (raw_payload)</summary>
+        <pre class="raw-json">{{ email.raw_payload | tojson(indent=2) }}</pre>
+      </details>
+    </div>
+
+  </div>
+</main>
+
+<script>
+  function switchTab(btn, tab) {
+    // 切换按钮状态
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    // 切换内容区域
+    const plain = document.getElementById('tab-plain');
+    const html  = document.getElementById('tab-html');
+    if (tab === 'plain') {
+      plain.classList.remove('hidden');
+      html.classList.add('hidden');
+    } else {
+      html.classList.remove('hidden');
+      plain.classList.add('hidden');
+
+      // 自动撑高 iframe
+      const iframe = html.querySelector('iframe');
+      if (iframe) {
+        iframe.onload = () => {
+          try {
+            iframe.style.height = iframe.contentDocument.body.scrollHeight + 40 + 'px';
+          } catch(e) {}
+        };
+        // 触发一次 onload（srcdoc 有时已加载完）
+        iframe.dispatchEvent(new Event('load'));
+      }
+    }
+  }
+</script>
+
+</body>
+</html>
