@@ -4,11 +4,16 @@ webhook.py — Flask 应用，监听 8080 端口，接收 Cloudflare 邮件转�
 
 Cloudflare Email Workers 会将邮件以 HTTP POST 发送到此端点。
 字段解析兼容多种常见格式，避免因字段名不一致导致信息丢失。
+支持解析 raw MIME 原文（含 base64 + GBK 等非 UTF-8 编码）。
 """
 
+import email as _email_lib
+import email.header
+import email.policy
 import logging
 import os
 import random
+import re
 import string
 import time
 from datetime import datetime
@@ -93,12 +98,119 @@ def _parse_address_list(value) -> list[dict]:
     return []
 
 
+def _decode_mime_header(value: str) -> str:
+    """
+    解码 MIME 编码的邮件头，例如 =?GBK?B?...?= 或 =?GBK?Q?...?=。
+    返回 Unicode 字符串。
+    """
+    if not value:
+        return ""
+    parts = email.header.decode_header(value)
+    decoded = []
+    for raw, charset in parts:
+        if isinstance(raw, bytes):
+            decoded.append(raw.decode(charset or "utf-8", errors="replace"))
+        else:
+            decoded.append(raw)
+    return "".join(decoded).strip()
+
+
+def _parse_mime_raw(raw_mime: str) -> dict:
+    """
+    解析完整的 MIME 原文（payload["raw"] 字段），提取：
+    - from_email / from_name
+    - to_email / to_name
+    - subject
+    - body_text（text/plain，支持 base64 + 任意 charset）
+    - body_html（text/html，支持 base64 + 任意 charset）
+    - cc / bcc
+
+    兼容 GBK、GB2312、UTF-8、base64、quoted-printable 等常见编码组合。
+    """
+    result = {
+        "from_email": "", "from_name": "",
+        "to_email": "", "to_name": "",
+        "subject": "",
+        "body_text": "", "body_html": "",
+        "cc": [], "bcc": [],
+    }
+
+    try:
+        # compat32 policy 保留原始字节级信息，避免自动解码丢失数据
+        msg = _email_lib.message_from_string(raw_mime, policy=email.policy.compat32)
+    except Exception as e:
+        logger.error("MIME parse failed: %s", e)
+        return result
+
+    # ── 解析头部字段 ──────────────────────────────────────────────────
+    raw_from = msg.get("From", "")
+    from_email, from_name = _parse_address(_decode_mime_header(raw_from))
+    result["from_email"] = from_email
+    result["from_name"] = from_name
+
+    raw_to = msg.get("To", "")
+    to_email, to_name = _parse_address(_decode_mime_header(raw_to))
+    result["to_email"] = to_email
+    result["to_name"] = to_name
+
+    result["subject"] = _decode_mime_header(msg.get("Subject", ""))
+
+    raw_cc = msg.get("Cc", "") or msg.get("CC", "")
+    if raw_cc:
+        result["cc"] = _parse_address_list(_decode_mime_header(raw_cc))
+
+    raw_bcc = msg.get("Bcc", "") or msg.get("BCC", "")
+    if raw_bcc:
+        result["bcc"] = _parse_address_list(_decode_mime_header(raw_bcc))
+
+    # ── 遍历 MIME Part，提取正文 ──────────────────────────────────────
+    for part in msg.walk():
+        content_type = part.get_content_type()
+        if content_type not in ("text/plain", "text/html"):
+            continue
+
+        # 跳过附件
+        disposition = part.get("Content-Disposition", "")
+        if "attachment" in disposition:
+            continue
+
+        # 获取字符集，默认 utf-8
+        charset = part.get_content_charset() or "utf-8"
+
+        try:
+            payload_bytes = part.get_payload(decode=True)  # 自动处理 base64/qp
+            if payload_bytes is None:
+                continue
+            text = payload_bytes.decode(charset, errors="replace")
+        except Exception as e:
+            logger.warning("Decode part (%s, charset=%s) failed: %s", content_type, charset, e)
+            continue
+
+        if content_type == "text/plain" and not result["body_text"]:
+            result["body_text"] = text
+        elif content_type == "text/html" and not result["body_html"]:
+            result["body_html"] = text
+
+    return result
+
+
 def _extract_email_fields(payload: dict) -> dict:
     """
     从原始 payload 中提取标准化邮件字段。
-    兼容 Cloudflare Email Workers 及其他常见 webhook 字段命名。
+
+    策略（优先级从高到低）：
+    1. 若 payload 中含 "raw" 字段（完整 MIME 原文），优先解析 MIME。
+       MIME 中缺失的字段再从 payload 顶层补充（from/to/subject 等）。
+    2. 无 raw 时，从 payload 顶层字段兼容提取。
     """
-    # 发件人：尝试多个可能的字段名
+    # ── Step 1: 尝试解析 raw MIME ─────────────────────────────────────
+    raw_mime = payload.get("raw") or payload.get("rawEmail") or payload.get("raw_email") or ""
+    mime_fields: dict = {}
+    if raw_mime:
+        logger.info("Found raw MIME field, parsing MIME content")
+        mime_fields = _parse_mime_raw(raw_mime)
+
+    # ── Step 2: 从 payload 顶层读取备用值 ────────────────────────────
     raw_from = (
         payload.get("from")
         or payload.get("sender")
@@ -106,13 +218,8 @@ def _extract_email_fields(payload: dict) -> dict:
         or payload.get("fromAddress")
         or ""
     )
-    from_email, from_name = _parse_address(raw_from)
+    fallback_from_email, fallback_from_name = _parse_address(raw_from)
 
-    # 若字段中单独给出 from_name
-    if not from_name:
-        from_name = payload.get("from_name") or payload.get("fromName") or ""
-
-    # 收件人
     raw_to = (
         payload.get("to")
         or payload.get("recipient")
@@ -120,20 +227,16 @@ def _extract_email_fields(payload: dict) -> dict:
         or payload.get("toAddress")
         or ""
     )
-    to_email, to_name = _parse_address(raw_to)
-    if not to_name:
-        to_name = payload.get("to_name") or payload.get("toName") or ""
+    fallback_to_email, fallback_to_name = _parse_address(raw_to)
 
-    # 主题
-    subject = (
+    fallback_subject = (
         payload.get("subject")
         or payload.get("Subject")
         or payload.get("title")
-        or "(无主题)"
+        or ""
     )
 
-    # 正文：优先 text/plain，降级 html
-    body_text = (
+    fallback_body_text = (
         payload.get("body_text")
         or payload.get("bodyText")
         or payload.get("text")
@@ -141,21 +244,30 @@ def _extract_email_fields(payload: dict) -> dict:
         or payload.get("body")
         or ""
     )
-    body_html = (
+    fallback_body_html = (
         payload.get("body_html")
         or payload.get("bodyHtml")
         or payload.get("html")
         or ""
     )
 
-    # 如果只有 html 而没有纯文本，做简单降级：去除 HTML 标签作为摘要
-    if not body_text and body_html:
-        import re
-        body_text = re.sub(r"<[^>]+>", "", body_html).strip()
+    fallback_cc = _parse_address_list(payload.get("cc") or payload.get("CC") or [])
+    fallback_bcc = _parse_address_list(payload.get("bcc") or payload.get("BCC") or [])
 
-    # 抄送 / 密送
-    cc = _parse_address_list(payload.get("cc") or payload.get("CC") or [])
-    bcc = _parse_address_list(payload.get("bcc") or payload.get("BCC") or [])
+    # ── Step 3: 合并，MIME 优先，顶层字段兜底 ────────────────────────
+    from_email = mime_fields.get("from_email") or fallback_from_email
+    from_name  = mime_fields.get("from_name")  or fallback_from_name or payload.get("from_name") or ""
+    to_email   = mime_fields.get("to_email")   or fallback_to_email
+    to_name    = mime_fields.get("to_name")    or fallback_to_name  or payload.get("to_name") or ""
+    subject    = mime_fields.get("subject")    or fallback_subject  or "(无主题)"
+    body_text  = mime_fields.get("body_text")  or fallback_body_text
+    body_html  = mime_fields.get("body_html")  or fallback_body_html
+    cc         = mime_fields.get("cc")         or fallback_cc
+    bcc        = mime_fields.get("bcc")        or fallback_bcc
+
+    # 只有 HTML 没有纯文本时，剥离标签生成摘要文本
+    if not body_text and body_html:
+        body_text = re.sub(r"<[^>]+>", "", body_html).strip()
 
     return {
         "from_email": from_email,
