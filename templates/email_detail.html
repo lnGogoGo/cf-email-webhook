@@ -38,6 +38,25 @@
 
     header h1::before { content: "✉"; font-size: 1.2rem; }
 
+    .title-link {
+      color: inherit;
+      text-decoration: none;
+      border-radius: 6px;
+      padding: 2px 4px;
+      margin: -2px -4px;
+      transition: background .2s, color .2s;
+    }
+
+    .title-link:hover {
+      background: rgba(255,255,255,.12);
+    }
+
+    .title-link:focus-visible,
+    .back-btn:focus-visible {
+      outline: 2px solid rgba(255,255,255,.85);
+      outline-offset: 2px;
+    }
+
     .back-btn {
       color: #fff;
       text-decoration: none;
@@ -223,8 +242,8 @@
 <body>
 
 <header>
-  <h1>邮件详情</h1>
-  <a class="back-btn" href="/">← 返回列表</a>
+  <h1><a class="title-link" href="/" aria-label="返回首页">邮件详情</a></h1>
+  <a class="back-btn" href="/">← 返回首页</a>
 </header>
 
 <main>
